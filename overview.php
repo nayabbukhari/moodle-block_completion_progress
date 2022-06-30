@@ -46,6 +46,9 @@ $page     = optional_param('page', 0, PARAM_INT); // Which page to show.
 $perpage  = optional_param('perpage', DEFAULT_PAGE_SIZE, PARAM_INT); // How many per page.
 $group    = optional_param('group', 0, PARAM_ALPHANUMEXT); // Group selected.
 
+$instanceid = $id;
+
+
 // Determine course and context.
 $course = $DB->get_record('course', array('id' => $courseid), '*', MUST_EXIST);
 $context = context_course::instance($courseid);
@@ -331,8 +334,16 @@ for ($i = $startuser; $i < $enduser; $i++) {
         $attemptid = $users[$i]->submissions;
         $progressbar = block_completion_progress_bar($attemptid, $useractivities, $completions, $config, $users[$i]->id, $course->id,
         $block->id, true);
-        $progressvalue = block_completion_progress_percentage($useractivities, $completions);
-        $progress = $progressvalue.'%';
+        
+        // Progress calculation for Trainer
+        $progressvalue_trainer = block_completion_progress_percentage($useractivities, $completions, '');
+ 
+        // Progress calculation for Student
+        $progressvalue = block_completion_progress_percentage($useractivities, $completions, 'Student');
+
+        // Display progress column
+        $progress = progress_col($progressvalue, $progressvalue_trainer, $users[$i], $context, $courseid, $instanceid );
+
     } else {
         $progressbar = get_string('no_visible_activities_message', 'block_completion_progress');
         $progressvalue = 0;

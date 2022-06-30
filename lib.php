@@ -600,7 +600,7 @@ function block_completion_progress_bar($attempt, $activities, $completions, $con
         if (empty($activity['link'])) {
             $celloptions['data-haslink'] = 'false';
         } else if (!empty($activity['available']) || $simple) {
-            $celloptions['data-haslink'] = 'true';
+            $celloptions['data-haslink'] = 'false';  // temporary fixed: original  'true'
         } else if (!empty($activity['link'])) {
             $celloptions['data-haslink'] = 'not-allowed';
         }
@@ -630,8 +630,23 @@ function block_completion_progress_bar($attempt, $activities, $completions, $con
 
     // Add the percentage below the progress bar.
     if ($showpercentage == 1 && !$simple) {
-        $progress = block_completion_progress_percentage($activities, $completions);
-        $percentagecontent = get_string('progress', 'block_completion_progress').': '.$progress.'%';
+        $progress_teacher = block_completion_progress_percentage($activities, $completions, '');
+        $progress_student = block_completion_progress_percentage($activities, $completions, 'Student');
+        if ($progress_student > 85 && $progress_teacher < 100 ) {
+            ///** 
+            // email to all student with 100% completed in last ? days.
+            $link = new moodle_url($CFG->wwwroot.'/blocks/completion_progress/email.php', 
+                        array('instanceid' => $instance, 'courseid' => $courseid, 'studentid' => $userid, 
+                                'sesskey' => sesskey(), 'email' => 'teacher'));
+                
+            $percentagecontent =   $OUTPUT->action_link($link, 'Submit all Assessments', null, ['class' => 'btn btn-sm btn-primary'])
+                                    . '<br> Student : '.$progress_student.'%, Please wait for final result <br>' .
+                                    get_string('progress', 'block_completion_progress').' Trainer : '.$progress_teacher.'%';
+        }else{
+            $percentagecontent = get_string('progress', 'block_completion_progress').' Student : '.$progress_student.'% <br> '.
+                                 get_string('progress', 'block_completion_progress').' Trainer : '.$progress_teacher.'%';
+        }
+        // $percentagecontent .= '';
         $percentageoptions = array('class' => 'progressPercentage');
         $content .= HTML_WRITER::tag('div', $percentagecontent, $percentageoptions);
     }
@@ -669,7 +684,7 @@ function block_completion_progress_bar($attempt, $activities, $completions, $con
                 array('src' => $activity['icon'], 'class' => 'moduleIcon', 'alt' => '', 'role' => 'presentation'));
         $text .= s(format_string($activity['name']));
         if (!empty($activity['link']) && (!empty($activity['available']) || $simple)) {
-            $content .= $OUTPUT->action_link($activity['link'], $text, null, ['class' => 'action_link', 'target' => '_blank']);
+            $content .= $OUTPUT->action_link($activity['link'], $text, null, ['class' => 'btn btn-block btn-primary', 'target' => '_blank']);
         } else {
             $content .= $text;
         }
@@ -717,21 +732,43 @@ function block_completion_progress_bar($attempt, $activities, $completions, $con
  * @param array $completions The user's attempts on course activities
  * @return int  Progress value as a percentage
  */
-function block_completion_progress_percentage($activities, $completions) {
-    $completecount = 0;
-
+function block_completion_progress_percentage($activities, $completions, $role) {
+    $completecount_trainer = 0;
+    $completecount_student = 0;
+    
     foreach ($activities as $activity) {
         if (
+            $role == 'Student' &&
             $completions[$activity['id']] == COMPLETION_COMPLETE ||
-            $completions[$activity['id']] == COMPLETION_COMPLETE_PASS
+            $completions[$activity['id']] == COMPLETION_COMPLETE_PASS ||
+            $completions[$activity['id']] === 'submitted' ||
+            $completions[$activity['id']] === 1
         ) {
-            $completecount++;
+            $completecount_student++;
+            
+        } 
+        if (
+            $role != 'Student' &&
+            $completions[$activity['id']] == 2 ||
+            $completions[$activity['id']] == COMPLETION_COMPLETE ||
+            $completions[$activity['id']] == COMPLETION_COMPLETE_PASS ||
+            $completions[$activity['id']] == COMPLETION_COMPLETE_FAIL
+            
+        ) {
+            $completecount_trainer++;
+            
         }
+        
+    
+
     }
-
-    $progressvalue = $completecount == 0 ? 0 : $completecount / count($activities);
-
-    return (int)round($progressvalue * 100);
+    if ($role != 'Student') {
+        $progressvalue_trainer = $completecount_trainer == 0 ? 0 : $completecount_trainer / count($activities);
+        return (int)round($progressvalue_trainer * 100);
+    } else {
+        $progressvalue_student = $completecount_student == 0 ? 0 : $completecount_student / count($activities);
+        return (int)round($progressvalue_student * 100);
+    }
 }
 
 /**
@@ -799,4 +836,211 @@ function block_completion_progress_group_membership ($group, $courseid, $userid)
     }
 
     return false;
+}
+
+
+/**
+ * Check if the user is an trainer in the course.
+ *
+ * Please note that use of proper capabilities is always encouraged,
+ * this function is supposed to be used from core or for temporary hacks.
+ *
+ * @category access
+ *
+ * @param  int|stdClass  $user_or_id user id or user object
+ * @return bool true if user is one of the administrators, false otherwise
+ */
+function is_trainer($user_or_id = null, $courseid= null) {
+    global $USER, $COURSE, $DB;
+
+    if ($user_or_id === null) {
+        $user_or_id = $USER;
+    }
+
+    if ($courseid === null) {
+        $courseid = $COURSE->id;
+    }
+
+    if (empty($user_or_id)) {
+        return false;
+    }
+
+    if (empty($courseid)) {
+        return false;
+    }
+
+    if (!empty($user_or_id->id)) {
+        $userid = $user_or_id->id;
+    } else {
+        $userid = $user_or_id;
+    }
+
+    // Because this script is called many times (150+ for course page) with
+    // the same parameters, it is worth doing minor optimisations. This static
+    // cache stores the value for a single userid, saving about 2ms from course
+    // page load time without using significant memory. As the static cache
+    // also includes the value it depends on, this cannot break unit tests.
+
+    $sql = "SELECT u.id, c.id as course_id, r.shortname        
+            FROM acmdls_course c
+            JOIN acmdls_context ct ON c.id = ct.instanceid
+            JOIN acmdls_role_assignments ra ON ra.contextid = ct.id
+            JOIN acmdls_user u ON u.id = ra.userid
+            JOIN acmdls_role r ON r.id = ra.roleid
+            WHERE r.shortname = :role
+            AND c.id = :courseid
+            AND u.id = :userid";
+    $param = array('role' => 'teacher', 'courseid' => $courseid, 'userid' => $userid);
+
+    $knownresult = $DB->get_record_sql($sql, $param);
+    
+    if (!empty($knownresult->id)) {
+        return $knownresult->id;
+    }else {
+        return false;
+    }
+}
+
+/**
+ * Email to teacher 
+ * @param  int course id
+ * @param  int course context
+ * @param  obj student object
+ * @return raw course link
+ * 
+*/
+    function email_to_admin_teacher($student, $coursename, $courselink, $courseid, $instanceid, $teachers,  $managers, $duedate, $sesskey, $context) {
+    global $CFG, $USER;
+
+    // Email subject
+    $subject = 'NOTIFICATION: '. $student->firstname.' '. $student->lastname .'('.$student->username.') assessment submission';
+
+    foreach ($teachers as $touser){
+            $message = 'Hi <b>'.$touser->firstname. ' '.$touser->lastname. '</b><br><br>
+                        This is a notification that <b>STUDENT: '. $student->firstname.' '. $student->lastname .'('.$student->username.') </b>
+                        assessment submission for <b>Unit:'.$coursename.' </b>
+                        is ready and has been allocated to you for marking in Creatine 2.<br>
+                        Please ensure this assessment submission <b>('.$courselink.') </b>
+                        is marked before <b>NEXT 21 Days ('. $duedate.')</b>.<br>
+                        If you have any questions or concerns, please contact the College, ASAP. <br>
+                        <br><br>Do not reply to this email.<br><br>     
+                        Regards<br>
+                        <b>Australian College</b>';
+            $emailstatus = email_to_user($touser, $USER, $subject, $message, '', '', '', false);
+    }
+
+    foreach ($managers as $touser){
+            $message = 'Hi <b>'.$touser->firstname. ' '.$touser->lastname. '</b><br><br>
+                        <b>FYI: </b>
+                        This is a notification that <b>STUDENT: '. $student->firstname.' '. $student->lastname .'('.$student->username.') </b>
+                        assessment submission for <b>Unit:'.$coursename.' </b>
+                        is ready and has been allocated to you for marking in Creatine 2.<br>
+                        Please ensure this assessment submission <b>('.$courselink.')</b>
+                        is marked before <b>NEXT 21 Days ('. $duedate.')</b>.<br>
+                        If you have any questions or concerns, please contact the College, ASAP. <br>
+                        <br><br>Do not reply to this email.<br><br>
+                        Regards<br>
+                        <b>Australian College</b>';
+            $emailstatus = email_to_user($touser, $USER, $subject, $message, '', '', '', false);
+    }
+    
+    $notStudent = has_capability('mod/assignment:grade', $context) ? true : false;
+    
+    $student_link = new moodle_url($CFG->wwwroot.'/course/view.php', array('id' => $courseid, 'sesskey' => $sesskey));
+    $admin_link = new moodle_url($CFG->wwwroot.'/blocks/completion_progress/overview.php', 
+            array('instanceid' => $instanceid, 'courseid' => $courseid, 'sesskey' => $sesskey));
+
+    $notStudent ? $link = $admin_link : $link = $student_link;
+    
+    $email_sent =redirect(new moodle_url($link), 'Email sent successfully');
+    $email_not_sent =redirect(new moodle_url($link), 'Email not sent successfully, contact admin IT@australiancollege.edu.au');
+    
+    return $emailstatus ? $email_sent : $email_not_sent;
+}
+
+
+/**
+ * Email to student 
+ * @param  int course id
+ * @param  int course context
+ * @param  obj student object
+ * @return raw course link
+ * 
+*/
+function email_to_student($student, $coursename, $courselink, $courseid, $sesskey, $instanceid, $context) {
+    global $CFG, $USER;
+
+    $subject = 'NOTIFICATION: Check your Assessment result';
+    $message = 'Hi <b>'.$student->firstname. ' '.$student->lastname.'</b><br><br>
+                This is a notification that your trainer completed assessment marking of '.$coursename.'
+                Please check your grades '.$courselink.' <br>
+                If your result is not satisfactory, Please contact Australian college student administrator.
+                <br><br>Do not reply to this email.<br><br>
+                Regards<br>
+                <b>Australian College</b>';
+
+    $emailstatus = email_to_user($student, $USER, $subject, $message, '', '', '', false);
+    
+    $notStudent = has_capability('mod/assignment:grade', $context) ? true : false;
+    
+    $student_link = new moodle_url($CFG->wwwroot.'/course/view.php', array('id' => $courseid, 'sesskey' => $sesskey));
+    $teacher_link = new moodle_url($CFG->wwwroot.'/blocks/completion_progress/overview.php', 
+            array('instanceid' => $instanceid, 'courseid' => $courseid, 'sesskey' => $sesskey));
+
+    $notStudent ? $link = $teacher_link : $link = $student_link;
+    
+    $email_sent =redirect(new moodle_url($link), 'Email sent successfully to '.$student->firstname. ' '.$student->lastname);
+    $email_not_sent =redirect(new moodle_url($link), 'Email not sent successfully, contact admin IT@australiancollege.edu.au');
+    
+    return $emailstatus ? $email_sent : $email_not_sent;
+}
+
+
+/**
+ * Progress Column Ouput.
+ *
+ *
+ * @category access
+ *
+ * @param  int  progressvalue student progress
+ * @param  int  progressvalue_trainer trainer progress
+ * @param  int | stdClass user object
+ * @param  int course context id
+ * @param  int course id
+ * @param  int course instance id
+ * @return output Progress object
+ */
+function progress_col($progressvalue, $progressvalue_trainer, $user, $context, $courseid, $instanceid ) {
+    global $CFG, $OUTPUT;
+    $progress = '';
+    
+    // Display "Assign to trainer" button to site admins, if student progress is equal 100% 
+    if ($progressvalue >= 90 && is_siteadmin() == 1  && $progressvalue_trainer < 50) {
+                    
+        $link = new moodle_url($CFG->wwwroot.'/blocks/completion_progress/email.php', 
+                    array('instanceid' => $instanceid, 'courseid' => $courseid, 'studentid' => $user->id, 
+                            'sesskey' => sesskey(), 'email' => 'teacher'));
+            
+        $progress .= $OUTPUT->action_link($link, $progressvalue.'%:AssignTrainer', null, ['class' => 'btn btn-sm btn-primary']);
+
+    }else{
+        $progress .= 'Student : '. $progressvalue .'%  <br>';
+    }
+    
+    
+    $trainerid = is_trainer();
+    if ($trainerid != false){
+
+        // Display "Release result" button to course trainer, if trainer progress is equal 90% 
+        $link = new moodle_url($CFG->wwwroot.'/blocks/completion_progress/email.php', 
+                array('instanceid' => $instanceid, 'courseid' => $courseid, 'studentid' => $user->id, 
+                        'userto' => $user->id, 'sesskey' => sesskey(), 'email' => 'student'));
+                
+        $progress .= $OUTPUT->action_link($link, $progressvalue_trainer.'%:ReleaseResult', null, ['class' => 'btn btn-sm btn-success']);
+
+    }else{
+        $progress .= 'Trainer : '.$progressvalue_trainer.'% <br>';
+    }
+
+    return $progress;
 }
